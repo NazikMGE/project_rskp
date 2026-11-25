@@ -1,0 +1,38 @@
+Envelopes recomputed with SciPy vs. the detector journal (1 Hz diagnostic lines)
+  t, s    state        E journal  E scipy   E float32  G journal  G scipy
+   0.995  IDLE            0.037    0.0371    0.0371      0.865    0.8653
+   1.995  IDLE            0.105    0.1052    0.1052      0.020    0.0203
+   2.995  HOLD            0.041    0.0412    0.0412      0.024    0.0241
+   3.995  HOLD            0.063    0.0626    0.0626      0.024    0.0237
+   4.995  HOLD            0.017    0.0170    0.0170      0.022    0.0222
+   5.995  REFRACTORY      0.050    0.0494    0.0493      0.028    0.0277
+   6.995  REFRACTORY      0.079    0.0783    0.0782      0.022    0.0216
+   7.995  REFRACTORY      0.045    0.0441    0.0440      0.546    0.5456
+   8.995  IDLE            0.049    0.0482    0.0481      0.029    0.0291
+   9.995  HOLD            0.062    0.0618    0.0618      0.023    0.0231
+  10.995  HOLD            0.057    0.0568    0.0567      0.027    0.0275
+  11.995  HOLD            0.064    0.0635    0.0635      0.025    0.0253
+  12.995  HOLD            0.040    0.0392    0.0391      0.017    0.0172
+  13.995  HOLD            0.059    0.0583    0.0582      0.018    0.0178
+  14.995  REFRACTORY      0.026    0.0247    0.0235      0.026    0.0264
+  15.995  REFRACTORY      0.042    0.0411    0.0404      0.025    0.0254
+  16.995  REFRACTORY      0.077    0.0762    0.0758      0.773    0.7726
+  17.995  IDLE            0.051    0.0502    0.0496      0.022    0.0222
+  18.995  HOLD            0.075    0.0742    0.0738      0.067    0.0672
+  19.995  HOLD            0.058    0.0577    0.0571      0.048    0.0483
+  20.995  HOLD            0.095    0.0949    0.0946      0.055    0.0554
+  21.995  REFRACTORY      0.058    0.0572    0.0566      0.739    0.7386
+  22.995  REFRACTORY      0.039    0.0378    0.0370      0.047    0.0467
+  23.995  REFRACTORY      0.052    0.0506    0.0500      0.067    0.0666
+  largest difference, double precision: E 0.0014 m/s^2, G 0.0005 rad/s
+    of that before the first release: E 0.0004 m/s^2
+  largest difference, firmware arithmetic (float32 running sum): E 0.0025 m/s^2
+  (the journal prints three decimals, so 0.0005 is its rounding error)
+
+Onset of release 1 recomputed from the interpolation formula
+  crossing sample k = 1000 (t = 5.000 s), threshold T = 1.50 m/s^2
+  E[k-1] = 0.0170, E[k] = 14.5235 m/s^2
+  f = (T - E[k-1]) / (E[k] - E[k-1]) = 0.1022
+  t[k-1] = 64995000 us; onset = t[k-1] + f * 5000 = 64995511 us
+  reported = (onset - 12000) / 1000 = 64983 ms; detector journal: 64983 ms
+  envelope at the trigger (sample k+2): scipy 26.79, journal 26.79 m/s^2

@@ -1,0 +1,24 @@
+stability host tests
+[ PASS ] test_defaults                           14 checks
+[ PASS ] test_null_arguments_are_safe             2 checks
+[ PASS ] test_set_config_replaces_all_fields      2 checks
+[ PASS ] test_still_device_scores_100             5 checks
+[ PASS ] test_hand_calculated_second_frame        3 checks
+[ PASS ] test_baseline_tremor_steady_state        3 checks
+[ PASS ] test_unit_instability_halves_score       4 checks
+[ PASS ] test_score_decreases_with_tremor        10 checks
+[ PASS ] test_instability_is_weighted_sum         2 checks
+[ PASS ] test_rate_term_response_time             4 checks
+[ PASS ] test_score_recovers_after_motion         2 checks
+    sway RMS for a 0.40 m/s^2 sine: 1.5 Hz -> 0.2813, 15 Hz -> 0.0038, constant -> 0.0000 m/s^2
+[ PASS ] test_sway_band_selectivity               4 checks
+[ PASS ] test_drift_step_and_recovery             3 checks
+[ PASS ] test_continuous_drift_lowers_score       2 checks
+[ PASS ] test_quaternion_double_cover             4 checks
+[ PASS ] test_non_unit_quaternion_is_clamped      4 checks
+[ PASS ] test_zero_quaternion_stays_finite        5 checks
+[ PASS ] test_nan_score_does_not_stick            3 checks
+[ PASS ] test_zero_baselines_do_not_divide_by_zero   5 checks
+[ PASS ] test_diagnostic_log_once_per_second      4 checks
+stability: 20 tests, 20 passed, 0 failed; 85 checks, 0 failed
+exit code: 0

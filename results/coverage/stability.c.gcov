@@ -1,0 +1,346 @@
+        -:    0:Source:services/stability/src/stability.c
+        -:    0:Graph:C:\Users\nazar\AppData\Local\Temp\stability_tracker_host_build\CMakeFiles\stability.dir\b802ffb46a64bbc149eeaa58e47cbd87\project\firmware\services\stability\src\stability.c.gcno
+        -:    0:Data:C:\Users\nazar\AppData\Local\Temp\stability_tracker_host_build\CMakeFiles\stability.dir\b802ffb46a64bbc149eeaa58e47cbd87\project\firmware\services\stability\src\stability.c.gcda
+        -:    0:Runs:1
+        -:    1:#include "stability/stability.h"
+        -:    2:
+        -:    3:#include <math.h>
+        -:    4:#include <string.h>
+        -:    5:
+        -:    6:#include "esp_log.h"
+        -:    7:
+        -:    8:/**
+        -:    9: * @file stability.c
+        -:   10: * @brief Hold-stability score — implementation.
+        -:   11: *
+        -:   12: * Per 50 Hz frame, three EMA-weighted RMS estimates drive the score:
+        -:   13: *   - RMS_omega: |gyro|, single-pole EMA on the squared magnitude     (tremor)
+        -:   14: *   - RMS_accel: bandpass(|a|), single-pole EMA on the squared mag    (sway)
+        -:   15: *   - RMS_disp:  geodesic |q ⊖ qref|, single-pole EMA on the squared
+        -:   16: *                angle, where qref is a slow EMA of the orientation   (drift)
+        -:   17: *
+        -:   18: * Each term is normalised to a per-archer baseline, combined with
+        -:   19: * expert weights into an instability index I, and mapped to 0..100 by
+        -:   20: * an exponential decay (score = 100*exp(-k*I): I=0 -> 100, I=1 -> 50).
+        -:   21: * A display EMA smooths the result.
+        -:   22: *
+        -:   23: * Single-pole EMA replaces the earlier rectangular-window running mean
+        -:   24: * for one reason: live biofeedback. A rectangular window holds old
+        -:   25: * samples at equal weight until they evict — a step "moving → still"
+        -:   26: * stays elevated for a full window-width (~1 s here) before settling,
+        -:   27: * which broke the user-perceived feedback loop. An EMA reaches 63 % of
+        -:   28: * a step response in one tau and weighs recent samples more, so the
+        -:   29: * user sees the metric react in 100-200 ms rather than 1-2 s. The
+        -:   30: * trade-off is a noisier output sample-to-sample; the display EMA
+        -:   31: * (smoothing_alpha) absorbs that. Note: the per-frame output is a
+        -:   32: * weighted RMS, not a rectangular-window RMS — research-grade windowed
+        -:   33: * statistics are computed offline from the raw 50 Hz IMU stream that
+        -:   34: * the mobile app records per session.
+        -:   35: *
+        -:   36: * Constants here are starting points; the weights, the decay rate,
+        -:   37: * the baselines and the EMA alphas are all exposed through
+        -:   38: * @ref stability_config_t for the planned tuning UI.
+        -:   39: */
+        -:   40:
+        -:   41:static const char *TAG = "stability";
+        -:   42:
+        -:   43:/* ---- rates ---------------------------------------------------------- */
+        -:   44:
+        -:   45:/** Frame rate the score and its filter coefficients assume. */
+        -:   46:#define STAB_FS_HZ 50
+        -:   47:
+        -:   48:/* ---- low-frequency accel bandpass ----------------------------------- */
+        -:   49:
+        -:   50:/*
+        -:   51: * 0.5-3 Hz Butterworth bandpass at fs = 50 Hz, as a cascade of two
+        -:   52: * Direct Form II biquads. From
+        -:   53: *   scipy.signal.butter(2, [0.5, 3.0], 'band', fs=50, output='sos')
+        -:   54: * Run at 50 Hz on purpose: at 200 Hz the 0.5 Hz edge puts the poles at
+        -:   55: * radius ~0.99 (float32-fragile); at 50 Hz they sit at ~0.96.
+        -:   56: */
+        -:   57:#define STAB_BP0_B0 0.0200833656f
+        -:   58:#define STAB_BP0_B1 0.0401667311f
+        -:   59:#define STAB_BP0_B2 0.0200833656f
+        -:   60:#define STAB_BP0_A1 -1.5977831770f
+        -:   61:#define STAB_BP0_A2 0.6929224132f
+        -:   62:#define STAB_BP1_B0 1.0000000000f
+        -:   63:#define STAB_BP1_B1 -2.0000000000f
+        -:   64:#define STAB_BP1_B2 1.0000000000f
+        -:   65:#define STAB_BP1_A1 -1.9207935713f
+        -:   66:#define STAB_BP1_A2 0.9255748202f
+        -:   67:
+        -:   68:/* ---- single-pole EMA RMS estimator ---------------------------------- */
+        -:   69:
+        -:   70:/**
+        -:   71: * @brief Exponentially-weighted RMS estimator. O(1) state, no buffer.
+        -:   72: *
+        -:   73: * `mean_sq` carries the running EMA of the squared input; `sqrt` of it
+        -:   74: * is the current RMS. Seeded on the first sample to avoid the slow
+        -:   75: * ramp-up from zero a cold EMA would otherwise have.
+        -:   76: */
+        -:   77:typedef struct {
+        -:   78:  float mean_sq;
+        -:   79:  bool seeded;
+        -:   80:} ema_rms_t;
+        -:   81:
+        -:   82:/* ---- Forward declarations -----------------------------------------
+        -:   83: *
+        -:   84: * Defined later in this file; declared up front so a future reorder
+        -:   85: * stays compile-safe. */
+        -:   86:
+        -:   87:static void ema_rms_init(ema_rms_t *r);
+        -:   88:static float ema_rms_push(ema_rms_t *r, float x, float alpha);
+        -:   89:static float stab_bandpass(float x);
+        -:   90:
+function ema_rms_init called 78 returned 100% blocks executed 100%
+       78:   91:static void ema_rms_init(ema_rms_t *r) {
+       78:   92:  r->mean_sq = 0.0f;
+       78:   93:  r->seeded = false;
+       78:   94:}
+        -:   95:
+        -:   96:/**
+        -:   97: * @brief Push one sample, return updated RMS.
+        -:   98: *
+        -:   99: * The EMA carries float rounding error; a long run of near-zero samples
+        -:  100: * can leave `mean_sq` a hair below zero, so clamp before the square
+        -:  101: * root — otherwise sqrtf() yields NaN and poisons the score.
+        -:  102: */
+function ema_rms_push called 23292 returned 100% blocks executed 100%
+    23292:  103:static float ema_rms_push(ema_rms_t *r, float x, float alpha) {
+    23292:  104:  float sq = x * x;
+    23292:  105:  if (!r->seeded) {
+branch  0 taken 72 (fallthrough)
+branch  1 taken 23220
+       72:  106:    r->mean_sq = sq;
+       72:  107:    r->seeded = true;
+        -:  108:  } else {
+    23220:  109:    r->mean_sq += alpha * (sq - r->mean_sq);
+        -:  110:  }
+    23292:  111:  return sqrtf(fmaxf(r->mean_sq, 0.0f));
+        -:  112:}
+        -:  113:
+        -:  114:/* ---- state ---------------------------------------------------------- */
+        -:  115:
+        -:  116:static struct {
+        -:  117:  /* low-frequency accel bandpass (2 cascaded biquads) */
+        -:  118:  float bp0_w0, bp0_w1;
+        -:  119:  float bp1_w0, bp1_w1;
+        -:  120:
+        -:  121:  /* per-component EMA-RMS estimators */
+        -:  122:  ema_rms_t omega_rms;
+        -:  123:  ema_rms_t accel_rms;
+        -:  124:  ema_rms_t disp_rms;
+        -:  125:
+        -:  126:  /* low-passed reference orientation for the drift term */
+        -:  127:  float qref[4];
+        -:  128:  bool qref_seeded;
+        -:  129:
+        -:  130:  /* display smoothing */
+        -:  131:  float score_smoothed;
+        -:  132:  bool score_seeded;
+        -:  133:
+        -:  134:  stability_config_t cfg;
+        -:  135:  uint32_t tick_count;
+        -:  136:} stab;
+        -:  137:
+        -:  138:/** @brief Two-section 0.5-3 Hz bandpass, Direct Form II. */
+function stab_bandpass called 7764 returned 100% blocks executed 100%
+     7764:  139:static float stab_bandpass(float x) {
+     7764:  140:  float d0 = x - STAB_BP0_A1 * stab.bp0_w0 - STAB_BP0_A2 * stab.bp0_w1;
+     7764:  141:  float y0 =
+     7764:  142:      STAB_BP0_B0 * d0 + STAB_BP0_B1 * stab.bp0_w0 + STAB_BP0_B2 * stab.bp0_w1;
+     7764:  143:  stab.bp0_w1 = stab.bp0_w0;
+     7764:  144:  stab.bp0_w0 = d0;
+        -:  145:
+     7764:  146:  float d1 = y0 - STAB_BP1_A1 * stab.bp1_w0 - STAB_BP1_A2 * stab.bp1_w1;
+     7764:  147:  float y1 =
+     7764:  148:      STAB_BP1_B0 * d1 + STAB_BP1_B1 * stab.bp1_w0 + STAB_BP1_B2 * stab.bp1_w1;
+     7764:  149:  stab.bp1_w1 = stab.bp1_w0;
+     7764:  150:  stab.bp1_w0 = d1;
+     7764:  151:  return y1;
+        -:  152:}
+        -:  153:
+function stability_init called 26 returned 100% blocks executed 100%
+       26:  154:void stability_init(void) {
+       26:  155:  memset(&stab, 0, sizeof(stab));
+       26:  156:  ema_rms_init(&stab.omega_rms);
+call    0 returned 26
+       26:  157:  ema_rms_init(&stab.accel_rms);
+call    0 returned 26
+       26:  158:  ema_rms_init(&stab.disp_rms);
+call    0 returned 26
+        -:  159:
+        -:  160:  /* Defaults. Weights and map_k are expert-chosen; the baselines are
+        -:  161:   * nominal placeholders — a per-archer calibration replaces them via
+        -:  162:   * stability_set_config. map_k = ln(2): I=0 -> 100, I=1 -> 50.
+        -:  163:   * baseline_disp is kept well above the ~0.013 rad game-RV noise
+        -:  164:   * floor so a near-still input scores near the top.
+        -:  165:   *
+        -:  166:   * EMA alphas tuned for live biofeedback responsiveness — 63 % step
+        -:  167:   * response in ~100-200 ms, perceived response well under 500 ms:
+        -:  168:   *   - alpha_omega = 0.20  -> tau ~100 ms (tremor band is high-freq)
+        -:  169:   *   - alpha_accel_lf = 0.10 -> tau ~200 ms (sway is sub-Hz)
+        -:  170:   *   - alpha_disp = 0.10   -> tau ~200 ms (drift RMS)
+        -:  171:   *   - alpha_qref = 0.04   -> tau ~500 ms (trailing reference orientation;
+        -:  172:   *                                          slower so the drift term sees
+        -:  173:   *                                          actual deviation, not noise)
+        -:  174:   *   - smoothing_alpha = 0.25 -> tau ~80 ms (cosmetic; kills per-frame
+        -:  175:   *                                            flicker without adding lag) */
+       26:  176:  stab.cfg.w_omega = 0.45f;
+       26:  177:  stab.cfg.w_accel_lf = 0.10f;
+       26:  178:  stab.cfg.w_disp = 0.45f;
+       26:  179:  stab.cfg.map_k = 0.6931f;
+       26:  180:  stab.cfg.baseline_omega = 0.05f;
+       26:  181:  stab.cfg.baseline_accel_lf = 0.20f;
+       26:  182:  stab.cfg.baseline_disp = 0.10f;
+       26:  183:  stab.cfg.alpha_omega = 0.20f;
+       26:  184:  stab.cfg.alpha_accel_lf = 0.10f;
+       26:  185:  stab.cfg.alpha_disp = 0.10f;
+       26:  186:  stab.cfg.alpha_qref = 0.04f;
+       26:  187:  stab.cfg.smoothing_alpha = 0.25f;
+        -:  188:
+       26:  189:  ESP_LOGI(TAG, "ready — EMA-weighted hold score @ %d Hz", STAB_FS_HZ);
+call    0 returned 26
+       26:  190:}
+        -:  191:
+function stability_get_config called 9 returned 100% blocks executed 100%
+        9:  192:void stability_get_config(stability_config_t *cfg) {
+        9:  193:  if (cfg != NULL) {
+branch  0 taken 8 (fallthrough)
+branch  1 taken 1
+        8:  194:    *cfg = stab.cfg;
+        -:  195:  }
+        9:  196:}
+        -:  197:
+function stability_set_config called 6 returned 100% blocks executed 100%
+        6:  198:void stability_set_config(const stability_config_t *cfg) {
+        6:  199:  if (cfg == NULL) {
+branch  0 taken 1 (fallthrough)
+branch  1 taken 5
+        1:  200:    return;
+        -:  201:  }
+        5:  202:  stab.cfg = *cfg;
+        5:  203:  ESP_LOGI(TAG,
+call    0 returned 5
+        -:  204:           "config: w[omega=%.2f accelLF=%.2f disp=%.2f] mapK=%.4f "
+        -:  205:           "base[omega=%.4f accelLF=%.4f disp=%.4f] "
+        -:  206:           "alpha[omega=%.3f accelLF=%.3f disp=%.3f qref=%.3f smooth=%.3f]",
+        -:  207:           (double)stab.cfg.w_omega, (double)stab.cfg.w_accel_lf,
+        -:  208:           (double)stab.cfg.w_disp, (double)stab.cfg.map_k,
+        -:  209:           (double)stab.cfg.baseline_omega, (double)stab.cfg.baseline_accel_lf,
+        -:  210:           (double)stab.cfg.baseline_disp, (double)stab.cfg.alpha_omega,
+        -:  211:           (double)stab.cfg.alpha_accel_lf, (double)stab.cfg.alpha_disp,
+        -:  212:           (double)stab.cfg.alpha_qref, (double)stab.cfg.smoothing_alpha);
+        -:  213:}
+        -:  214:
+function stability_tick called 7764 returned 100% blocks executed 100%
+     7764:  215:void stability_tick(const float gyro_rad[3], const float lin_accel[3],
+        -:  216:                    const float quat[4], stability_output_t *out) {
+     7764:  217:  stab.tick_count++;
+        -:  218:
+        -:  219:  /* --- rate term: EMA-RMS of gyro magnitude --- */
+     7764:  220:  float w_mag = sqrtf(gyro_rad[0] * gyro_rad[0] + gyro_rad[1] * gyro_rad[1] +
+     7764:  221:                      gyro_rad[2] * gyro_rad[2]);
+     7764:  222:  float rms_omega = ema_rms_push(&stab.omega_rms, w_mag, stab.cfg.alpha_omega);
+call    0 returned 7764
+        -:  223:
+        -:  224:  /* --- sway term: EMA-RMS of bandpassed accel magnitude --- */
+        -:  225:  float a_mag =
+     7764:  226:      sqrtf(lin_accel[0] * lin_accel[0] + lin_accel[1] * lin_accel[1] +
+     7764:  227:            lin_accel[2] * lin_accel[2]);
+     7764:  228:  float a_lf = stab_bandpass(a_mag);
+call    0 returned 7764
+        -:  229:  float rms_accel =
+     7764:  230:      ema_rms_push(&stab.accel_rms, a_lf, stab.cfg.alpha_accel_lf);
+call    0 returned 7764
+        -:  231:
+        -:  232:  /* --- drift term: geodesic angle from a low-passed reference --- */
+     7764:  233:  if (!stab.qref_seeded) {
+branch  0 taken 24 (fallthrough)
+branch  1 taken 7740
+       24:  234:    stab.qref[0] = quat[0];
+       24:  235:    stab.qref[1] = quat[1];
+       24:  236:    stab.qref[2] = quat[2];
+       24:  237:    stab.qref[3] = quat[3];
+       24:  238:    stab.qref_seeded = true;
+        -:  239:  }
+        -:  240:  /* 4-D dot product = cos(half the rotation angle between q and qref). */
+     7764:  241:  float qd = quat[0] * stab.qref[0] + quat[1] * stab.qref[1] +
+     7764:  242:             quat[2] * stab.qref[2] + quat[3] * stab.qref[3];
+     7764:  243:  float qd_abs = fabsf(qd);
+     7764:  244:  if (qd_abs > 1.0f) {
+branch  0 taken 81 (fallthrough)
+branch  1 taken 7683
+       81:  245:    qd_abs = 1.0f;
+        -:  246:  }
+     7764:  247:  float ang_disp = 2.0f * acosf(qd_abs);
+     7764:  248:  float rms_disp = ema_rms_push(&stab.disp_rms, ang_disp, stab.cfg.alpha_disp);
+call    0 returned 7764
+        -:  249:
+        -:  250:  /* Low-pass the reference toward the current orientation; sign-align
+        -:  251:   * for the quaternion double cover, then renormalise to unit. */
+     7764:  252:  float sign = (qd < 0.0f) ? -1.0f : 1.0f;
+branch  0 taken 50 (fallthrough)
+branch  1 taken 7714
+    38820:  253:  for (int i = 0; i < 4; i++) {
+branch  0 taken 31056
+branch  1 taken 7764 (fallthrough)
+    31056:  254:    stab.qref[i] += stab.cfg.alpha_qref * (sign * quat[i] - stab.qref[i]);
+        -:  255:  }
+     7764:  256:  float qn = sqrtf(stab.qref[0] * stab.qref[0] + stab.qref[1] * stab.qref[1] +
+     7764:  257:                   stab.qref[2] * stab.qref[2] + stab.qref[3] * stab.qref[3]);
+     7764:  258:  if (qn > 1e-6f) {
+branch  0 taken 7714 (fallthrough)
+branch  1 taken 50
+     7714:  259:    stab.qref[0] /= qn;
+     7714:  260:    stab.qref[1] /= qn;
+     7714:  261:    stab.qref[2] /= qn;
+     7714:  262:    stab.qref[3] /= qn;
+        -:  263:  }
+        -:  264:
+        -:  265:  /* --- normalise, combine, map --- */
+     7764:  266:  float r_omega = rms_omega / fmaxf(stab.cfg.baseline_omega, 1e-6f);
+     7764:  267:  float r_accel = rms_accel / fmaxf(stab.cfg.baseline_accel_lf, 1e-6f);
+     7764:  268:  float r_disp = rms_disp / fmaxf(stab.cfg.baseline_disp, 1e-6f);
+     7764:  269:  float instability = stab.cfg.w_omega * r_omega +
+     7764:  270:                      stab.cfg.w_accel_lf * r_accel + stab.cfg.w_disp * r_disp;
+        -:  271:
+        -:  272:  /* Exponential map: I=0 -> 100 (ideal), I=1 -> 50 (baseline); halves
+        -:  273:   * every unit of I. expf of a large negative underflows to 0, so the
+        -:  274:   * score stays within [0, 100] for any non-negative instability. */
+     7764:  275:  float score = 100.0f * expf(-stab.cfg.map_k * instability);
+        -:  276:
+        -:  277:  /* Seed on the first tick; also re-seed if the smoothed value was ever
+        -:  278:   * left non-finite, so a stray NaN can never stick permanently. */
+     7764:  279:  if (!stab.score_seeded || !isfinite(stab.score_smoothed)) {
+branch  0 taken 7740 (fallthrough)
+branch  1 taken 24
+call    2 returned 7740
+branch  3 taken 3 (fallthrough)
+branch  4 taken 7737
+       27:  280:    stab.score_smoothed = score;
+       27:  281:    stab.score_seeded = true;
+        -:  282:  } else {
+     7737:  283:    stab.score_smoothed +=
+     7737:  284:        stab.cfg.smoothing_alpha * (score - stab.score_smoothed);
+        -:  285:  }
+        -:  286:
+     7764:  287:  if (out != NULL) {
+branch  0 taken 7763 (fallthrough)
+branch  1 taken 1
+     7763:  288:    out->score = stab.score_smoothed;
+     7763:  289:    out->rms_omega = rms_omega;
+     7763:  290:    out->rms_accel_lf = rms_accel;
+     7763:  291:    out->rms_disp = rms_disp;
+     7763:  292:    out->instability = instability;
+        -:  293:  }
+        -:  294:
+        -:  295:  /* 1 Hz diagnostic — the data the weights/baselines are tuned against. */
+     7764:  296:  if (stab.tick_count % STAB_FS_HZ == 0) {
+branch  0 taken 155 (fallthrough)
+branch  1 taken 7609
+      155:  297:    ESP_LOGI(TAG, "score=%.0f I=%.2f | RMS w=%.4f a=%.4f d=%.4f",
+call    0 returned 155
+        -:  298:             stab.score_smoothed, instability, rms_omega, rms_accel, rms_disp);
+        -:  299:  }
+     7764:  300:}

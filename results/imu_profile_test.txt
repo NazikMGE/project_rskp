@@ -1,0 +1,2 @@
+imu_profile_test: PASS
+exit code: 0

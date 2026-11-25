@@ -1,0 +1,58 @@
+I (shot_detect) ready — V4 dual-channel (accel + gyro) detector @ 200 Hz
+I (stability) ready — EMA-weighted hold score @ 50 Hz
+I (shot_detect) [IDLE] E=0.037 base=0.055 | G=0.865 gbase=0.808
+I (stability) score=0 I=8.40 | RMS w=0.8429 a=0.5309 d=0.1228
+I (shot_detect) [IDLE] E=0.105 base=0.055 | G=0.020 gbase=0.808
+I (stability) score=3 I=4.23 | RMS w=0.3713 a=0.5901 d=0.1327
+I (shot_detect) [HOLD] E=0.041 base=0.055 | G=0.024 gbase=0.808
+I (stability) score=76 I=0.36 | RMS w=0.0151 a=0.1994 d=0.0285
+I (shot_detect) [HOLD] E=0.063 base=0.052 | G=0.024 gbase=0.321
+I (stability) score=86 I=0.21 | RMS w=0.0194 a=0.0386 d=0.0044
+I (shot_detect) [HOLD] E=0.017 base=0.047 | G=0.022 gbase=0.133
+I (stability) score=90 I=0.15 | RMS w=0.0153 a=0.0100 d=0.0021
+I (shot_detect) trigger: onset=64983 ms (E=26.79/1.50 G=1.70/1.10)
+I (shot_detect) CONFIRMED: onset=64983 ms peak=17.75 gpeak=1.67 sustain=35/35
+I (shot_detect) [REFRACTORY] E=0.050 base=0.119 | G=0.028 gbase=0.138
+I (stability) score=44 I=1.02 | RMS w=0.0246 a=1.5797 d=0.0028
+I (shot_detect) [REFRACTORY] E=0.079 base=0.119 | G=0.022 gbase=0.138
+I (stability) score=79 I=0.32 | RMS w=0.0173 a=0.3035 d=0.0019
+I (shot_detect) [REFRACTORY] E=0.045 base=0.119 | G=0.546 gbase=0.138
+I (stability) score=0 I=8.10 | RMS w=0.8173 a=0.3127 d=0.1297
+I (shot_detect) [IDLE] E=0.049 base=0.119 | G=0.029 gbase=0.138
+I (stability) score=4 I=3.84 | RMS w=0.3673 a=0.2747 d=0.0888
+I (shot_detect) [HOLD] E=0.062 base=0.118 | G=0.023 gbase=0.135
+I (stability) score=81 I=0.28 | RMS w=0.0133 a=0.2235 d=0.0119
+I (shot_detect) [HOLD] E=0.057 base=0.073 | G=0.027 gbase=0.065
+I (stability) score=87 I=0.20 | RMS w=0.0193 a=0.0331 d=0.0028
+I (shot_detect) [HOLD] E=0.064 base=0.057 | G=0.025 gbase=0.040
+I (stability) score=87 I=0.20 | RMS w=0.0201 a=0.0157 d=0.0021
+I (shot_detect) trigger: onset=71987 ms (E=1.79/1.50 G=0.03/0.50)
+I (shot_detect) rejected: onset=71987 ms peak=0.67 gpeak=0.03 sustain=4/35
+I (shot_detect) [HOLD] E=0.040 base=0.060 | G=0.017 gbase=0.036
+I (stability) score=88 I=0.18 | RMS w=0.0172 a=0.0286 d=0.0019
+I (shot_detect) [HOLD] E=0.059 base=0.052 | G=0.018 gbase=0.029
+I (stability) score=88 I=0.19 | RMS w=0.0188 a=0.0211 d=0.0015
+I (shot_detect) trigger: onset=73983 ms (E=25.01/1.50 G=1.56/0.50)
+I (shot_detect) CONFIRMED: onset=73983 ms peak=16.61 gpeak=1.55 sustain=35/35
+I (shot_detect) [REFRACTORY] E=0.026 base=0.119 | G=0.026 gbase=0.034
+I (stability) score=47 I=0.95 | RMS w=0.0202 a=1.4874 d=0.0050
+I (shot_detect) [REFRACTORY] E=0.042 base=0.119 | G=0.025 gbase=0.034
+I (stability) score=80 I=0.30 | RMS w=0.0167 a=0.2786 d=0.0013
+I (shot_detect) [REFRACTORY] E=0.077 base=0.119 | G=0.773 gbase=0.034
+I (stability) score=1 I=6.84 | RMS w=0.6522 a=0.6618 d=0.1419
+I (shot_detect) [IDLE] E=0.051 base=0.119 | G=0.022 gbase=0.034
+I (stability) score=2 I=4.71 | RMS w=0.4605 a=0.2288 d=0.0994
+I (shot_detect) [HOLD] E=0.075 base=0.119 | G=0.067 gbase=0.034
+I (stability) score=61 I=0.74 | RMS w=0.0614 a=0.1802 d=0.0220
+I (shot_detect) [HOLD] E=0.058 base=0.093 | G=0.048 gbase=0.045
+I (stability) score=71 I=0.46 | RMS w=0.0429 a=0.0750 d=0.0075
+I (shot_detect) [HOLD] E=0.095 base=0.081 | G=0.055 gbase=0.051
+I (stability) score=70 I=0.52 | RMS w=0.0511 a=0.0725 d=0.0056
+I (shot_detect) trigger: onset=81039 ms (E=0.07/1.50 G=0.59/0.50)
+I (shot_detect) CONFIRMED: onset=81039 ms peak=0.11 gpeak=0.63 sustain=35/35
+I (shot_detect) [REFRACTORY] E=0.058 base=0.080 | G=0.739 gbase=0.062
+I (stability) score=1 I=6.62 | RMS w=0.6189 a=0.3098 d=0.1990
+I (shot_detect) [REFRACTORY] E=0.039 base=0.080 | G=0.047 gbase=0.062
+I (stability) score=2 I=4.90 | RMS w=0.4715 a=0.3796 d=0.1042
+I (shot_detect) [REFRACTORY] E=0.052 base=0.080 | G=0.067 gbase=0.062
+I (stability) score=60 I=0.76 | RMS w=0.0611 a=0.2250 d=0.0221

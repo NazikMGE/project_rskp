@@ -1,0 +1,5 @@
+stimulus,t_s,expected,obtained,onset_error_ms,provisional_delay_ms,verdict_delay_ms,peak_mps2,hold_score
+release 1,5.000,CONFIRMED,CONFIRMED,-17,10,205,17.75,88.5
+knock,12.000,REJECTED,REJECTED,-13,10,205,0.67,87.4
+release 2,14.000,CONFIRMED,CONFIRMED,-17,10,205,16.61,88.4
+let-down,21.000,CONFIRMED,CONFIRMED,39,65,260,0.11,70.1

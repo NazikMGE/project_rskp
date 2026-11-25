@@ -1,0 +1,32 @@
+shot_detect host tests
+[ PASS ] test_defaults_and_null_safety            8 checks
+[ PASS ] test_config_rejects_invalid_values      12 checks
+[ PASS ] test_config_keeps_valid_values           2 checks
+[ PASS ] test_quiet_hold_produces_no_events       4 checks
+    clear release: provisional +10 ms, verdict +205 ms, onset error -17 ms, peak 17.8 m/s^2, sustain 35/35
+[ PASS ] test_clear_release_two_stage_event      11 checks
+[ PASS ] test_gyro_only_release                   4 checks
+    bump 4.5 m/s^2: peak 0.70 m/s^2, sustain 4/35 -> rejected
+[ PASS ] test_bump_is_rejected                    5 checks
+    short impulse: peak 9.79 m/s^2, sustain 16/35 -> confirmed by peak
+[ PASS ] test_short_strong_impulse_confirmed_by_peak   4 checks
+    bow lowering: peak 0.06 m/s^2, sustain 35/35 -> weak event
+[ PASS ] test_slow_lowering_confirmed_by_ringdown   5 checks
+[ PASS ] test_sub_debounce_blip_ignored           3 checks
+[ PASS ] test_not_armed_before_min_hold           1 checks
+[ PASS ] test_min_hold_is_clamped                 3 checks
+[ PASS ] test_draw_motion_keeps_detector_idle     2 checks
+    start in motion: gyro baseline 0.815 rad/s after the draw, 0.072 rad/s after 4 s of hold
+[ PASS ] test_start_in_motion_baseline_relaxes    7 checks
+[ PASS ] test_brief_wobble_keeps_hold             3 checks
+[ PASS ] test_long_unsteady_disarms_hold          1 checks
+[ PASS ] test_refractory_after_confirmed          5 checks
+[ PASS ] test_refractory_after_rejected           5 checks
+[ PASS ] test_adaptive_accel_threshold            2 checks
+[ PASS ] test_adaptive_gyro_threshold             2 checks
+[ PASS ] test_raised_floors_suppress_trigger      1 checks
+[ PASS ] test_batched_timestamps_do_not_break_fsm   4 checks
+[ PASS ] test_onset_saturates_at_zero             3 checks
+[ PASS ] test_diagnostic_log_names_every_state    5 checks
+shot_detect: 24 tests, 24 passed, 0 failed; 102 checks, 0 failed
+exit code: 0

@@ -1,0 +1,684 @@
+        -:    0:Source:services/shot_detect/src/shot_detect.c
+        -:    0:Graph:C:\Users\nazar\AppData\Local\Temp\stability_tracker_host_build\CMakeFiles\shot_detect.dir\b802ffb46a64bbc149eeaa58e47cbd87\project\firmware\services\shot_detect\src\shot_detect.c.gcno
+        -:    0:Data:C:\Users\nazar\AppData\Local\Temp\stability_tracker_host_build\CMakeFiles\shot_detect.dir\b802ffb46a64bbc149eeaa58e47cbd87\project\firmware\services\shot_detect\src\shot_detect.c.gcda
+        -:    0:Runs:1
+        -:    1:#include "shot_detect/shot_detect.h"
+        -:    2:
+        -:    3:#include <math.h>
+        -:    4:#include <string.h>
+        -:    5:
+        -:    6:#include "esp_log.h"
+        -:    7:
+        -:    8:/**
+        -:    9: * @file shot_detect.c
+        -:   10: * @brief Variant-V4 archery release detector — implementation.
+        -:   11: *
+        -:   12: * Two parallel trigger channels run on each 200 Hz IMU sample:
+        -:   13: *
+        -:   14: *   accel:  |a|      -> highpass(10 Hz) -> square -> mean(25 ms) -> sqrt = E
+        -:   15: *   gyro:   |omega|                     -> square -> mean(25 ms) -> sqrt = G
+        -:   16: *
+        -:   17: * E is the high-frequency hand-shock envelope; G is the bow-rotation
+        -:   18: * envelope. Each has its own adaptive baseline (an EMA taken while the
+        -:   19: * bow is held), and a release is triggered when EITHER channel crosses
+        -:   20: * its baseline-scaled threshold — a heavily damped compound with a weak
+        -:   21: * hand-shock still snaps into a fast forward rotation and is caught on G.
+        -:   22: * A post-onset window then confirms the release by its ring-down (on
+        -:   23: * either channel). A small FSM — IDLE -> HOLD -> VALIDATING ->
+        -:   24: * REFRACTORY — sequences it.
+        -:   25: *
+        -:   26: * FSM durations (hold, settle, validation window, refractory) are
+        -:   27: * counted in SAMPLES, not wall-clock time: imu_task stamps each sample
+        -:   28: * at processing time, so a preempted task or batched IMU reports would
+        -:   29: * bunch the timestamps. One tick is one sample regardless, so sample
+        -:   30: * counts are immune to that. Wall-clock (`t_us`) is used only to form
+        -:   31: * the reported onset timestamp.
+        -:   32: *
+        -:   33: * Constants here are starting points; the floor values and the K
+        -:   34: * multipliers are meant to be tuned from real-bow envelope recordings —
+        -:   35: * the 1 Hz diagnostic log exists for exactly that.
+        -:   36: */
+        -:   37:
+        -:   38:static const char *TAG = "shot_detect";
+        -:   39:
+        -:   40:/* ---- signal chain --------------------------------------------------- */
+        -:   41:
+        -:   42:/** Sample rate the detector and its filter coefficients assume. */
+        -:   43:#define SD_FS_HZ 200
+        -:   44:
+        -:   45:/*
+        -:   46: * Highpass: 2nd-order Butterworth, fc = 10 Hz at fs = 200 Hz, applied as
+        -:   47: * a Direct Form II biquad. Equivalent to
+        -:   48: *   scipy.signal.butter(2, 10, 'highpass', fs=200, output='sos')
+        -:   49: * fc/Nyquist = 0.1 sits well clear of the z=1 conditioning trap, so
+        -:   50: * float32 coefficients are safe here. SD_HP_A1/A2 are the normalised
+        -:   51: * denominator coefficients (the difference equation carries the sign).
+        -:   52: */
+        -:   53:#define SD_HP_B0 0.80059240f
+        -:   54:#define SD_HP_B1 -1.60118480f
+        -:   55:#define SD_HP_B2 0.80059240f
+        -:   56:#define SD_HP_A1 -1.56101808f
+        -:   57:#define SD_HP_A2 0.64135154f
+        -:   58:
+        -:   59:/** Running-mean window for both envelopes: 5 samples = 25 ms at 200 Hz. */
+        -:   60:#define SD_RMS_WIN 5
+        -:   61:
+        -:   62:/* ---- hold gate ------------------------------------------------------ */
+        -:   63:
+        -:   64:/** EMA weight for the gyro hold metric (tau ~= 0.3 s at 200 Hz). */
+        -:   65:#define SD_HOLD_GYRO_BETA 0.0166f
+        -:   66:
+        -:   67:/** Default gyro mean-square hold-gate threshold, in (rad/s)^2 — about
+        -:   68: *  10 deg/s RMS. Generous so novices qualify; the trigger and
+        -:   69: *  ring-down checks do the real work. Used as the @ref
+        -:   70: *  shot_detect_config_t::hold_gyro_threshold_rad_sq default. */
+        -:   71:#define SD_HOLD_GYRO_THRESH_SQ_DEFAULT 0.030f
+        -:   72:
+        -:   73:/** Consecutive non-steady samples tolerated before the hold disarms.
+        -:   74: *  A brief aim wobble or sight micro-correction must not drop to IDLE
+        -:   75: *  and discard the hold's arm progress; a draw, far longer, still does.
+        -:   76: *  300 ms at 200 Hz. */
+        -:   77:#define SD_HOLD_GRACE_SAMPLES (SD_FS_HZ * 300 / 1000)
+        -:   78:
+        -:   79:/* ---- adaptive baselines + trigger ----------------------------------- */
+        -:   80:
+        -:   81:/** EMA weight for the envelope baselines (tau ~= 1 s at 200 Hz). */
+        -:   82:#define SD_BASELINE_ALPHA 0.005f
+        -:   83:
+        -:   84:/** Default accel trigger ratio (threshold = max(floor, baseline * K)). */
+        -:   85:#define SD_TRIG_K_DEFAULT 6.0f
+        -:   86:
+        -:   87:/** Default accel envelope floor (m/s^2) — keeps a very steady archer
+        -:   88: *  from getting a hypersensitive trigger. */
+        -:   89:#define SD_TRIG_FLOOR_DEFAULT 1.5f
+        -:   90:
+        -:   91:/** Default gyro trigger ratio. Ratio-based against the held baseline,
+        -:   92: *  so it self-scales per bow and archer — no absolute dps figure. */
+        -:   93:#define SD_GYRO_TRIG_K_DEFAULT 8.0f
+        -:   94:
+        -:   95:/** Default gyro envelope floor (rad/s, ~29 deg/s) — backstop so a
+        -:   96: *  perfectly still device cannot get a near-zero gyro threshold. */
+        -:   97:#define SD_GYRO_TRIG_FLOOR_DEFAULT 0.5f
+        -:   98:
+        -:   99:/** Consecutive over-threshold samples needed to confirm a trigger. */
+        -:  100:#define SD_TRIG_DEBOUNCE 3
+        -:  101:
+        -:  102:/* ---- ring-down validation ------------------------------------------- */
+        -:  103:
+        -:  104:/** Envelope above baseline * SD_CONF_K counts as ring-down activity. */
+        -:  105:#define SD_CONF_K 3.0f
+        -:  106:
+        -:  107:/** Fraction of the window that must be active for the sustained path. */
+        -:  108:#define SD_SUSTAIN_FRAC 0.5f
+        -:  109:
+        -:  110:/** Peak above baseline * SD_STRONG_K confirms even a short ring-down
+        -:  111: *  (heavily damped compounds) — the bimodal confirm's second path. */
+        -:  112:#define SD_STRONG_K 25.0f
+        -:  113:
+        -:  114:/* ---- timing — counted in samples at SD_FS_HZ, jitter-immune --------- */
+        -:  115:
+        -:  116:/* Minimum hold time is runtime-tunable — see
+        -:  117: * @ref shot_detect_config_t::min_hold_ms. Default 500 ms (= SD_FS_HZ / 2
+        -:  118: * samples). Long enough to seed and settle the baselines past
+        -:  119: * SD_SETTLE_SAMPLES, short enough not to miss a fast recurve shooter
+        -:  120: * who releases soon after reaching anchor. */
+        -:  121:
+        -:  122:/** Baselines frozen for the start of a hold — still-settling motion. */
+        -:  123:#define SD_SETTLE_SAMPLES (SD_FS_HZ / 5) /* 200 ms */
+        -:  124:
+        -:  125:/** Ring-down window, in samples after the onset crossing. */
+        -:  126:#define SD_VALID_DELAY_SAMPLES (SD_FS_HZ * 30 / 1000) /* 30 ms */
+        -:  127:#define SD_VALID_END_SAMPLES (SD_FS_HZ * 200 / 1000)  /* 200 ms */
+        -:  128:
+        -:  129:/** Refractory after a confirmed shot / after a rejected trigger. */
+        -:  130:#define SD_REFRACTORY_OK_SAMPLES (SD_FS_HZ * 3)           /* 3 s */
+        -:  131:#define SD_REFRACTORY_REJ_SAMPLES (SD_FS_HZ * 300 / 1000) /* 300 ms */
+        -:  132:
+        -:  133:/** RMS-window + highpass group delay, subtracted from the reported
+        -:  134: *  onset so it tracks the physical release. Tune against ground truth. */
+        -:  135:#define SD_ENVELOPE_DELAY_US 12000ULL
+        -:  136:
+        -:  137:/** Default minimum hold time before a release may be triggered, in
+        -:  138: *  milliseconds (matches SD_MIN_HOLD_SAMPLES at SD_FS_HZ). */
+        -:  139:#define SD_MIN_HOLD_MS_DEFAULT 500u
+        -:  140:
+        -:  141:/** Safe clamps for the BLE-pushed config — keeps a malformed write from
+        -:  142: *  stalling the detector (e.g. a near-zero hold time would make the
+        -:  143: *  detector fire mid-draw). Wide enough for any plausible tuning. */
+        -:  144:#define SD_MIN_HOLD_MS_MIN 100u
+        -:  145:#define SD_MIN_HOLD_MS_MAX 5000u
+        -:  146:
+        -:  147:/** @brief Detector FSM state. */
+        -:  148:typedef enum {
+        -:  149:  SD_IDLE = 0,   /**< Bow not held steady. */
+        -:  150:  SD_HOLD,       /**< Held steady; baselines tracking, trigger armed. */
+        -:  151:  SD_VALIDATING, /**< Trigger fired; collecting the ring-down window. */
+        -:  152:  SD_REFRACTORY, /**< Post-event cooldown. */
+        -:  153:} sd_state_t;
+        -:  154:
+        -:  155:/** @brief All detector state — single instance, one IMU. */
+        -:  156:static struct {
+        -:  157:  sd_state_t state;
+        -:  158:
+        -:  159:  /* accel signal chain */
+        -:  160:  float hp_w0, hp_w1;        /**< highpass biquad delay line */
+        -:  161:  float rms_buf[SD_RMS_WIN]; /**< ring of squared highpass samples */
+        -:  162:  float rms_sum;             /**< running sum of rms_buf */
+        -:  163:  int rms_idx;
+        -:  164:  int rms_count;
+        -:  165:  float e_prev; /**< previous-tick accel envelope, for onset interpolation */
+        -:  166:
+        -:  167:  /* gyro signal chain */
+        -:  168:  float g_buf[SD_RMS_WIN]; /**< ring of gyro squared-magnitude samples */
+        -:  169:  float g_sum;             /**< running sum of g_buf */
+        -:  170:  int g_idx;
+        -:  171:  int g_count;
+        -:  172:  float g_env_prev; /**< previous-tick gyro envelope, for onset interpolation */
+        -:  173:
+        -:  174:  uint64_t t_prev_us; /**< previous-tick timestamp */
+        -:  175:
+        -:  176:  /* hold gate */
+        -:  177:  float gyro_g2_ema;        /**< EMA of gyro squared-magnitude */
+        -:  178:  uint32_t hold_start_tick; /**< tick_count when the steady stretch began */
+        -:  179:  uint32_t unsteady_count;  /**< consecutive non-steady samples */
+        -:  180:
+        -:  181:  /* adaptive baselines */
+        -:  182:  float baseline;  /**< accel envelope baseline */
+        -:  183:  float gyro_base; /**< gyro envelope baseline */
+        -:  184:  bool baseline_seeded;
+        -:  185:
+        -:  186:  /* trigger debounce */
+        -:  187:  int trig_count;      /**< 0 = no candidate, >0 = debouncing */
+        -:  188:  uint64_t onset_us;   /**< interpolated onset, wall clock — for the report */
+        -:  189:  uint32_t onset_tick; /**< tick_count at the onset crossing — window timing */
+        -:  190:
+        -:  191:  /* ring-down validation */
+        -:  192:  int valid_total;
+        -:  193:  int valid_active;
+        -:  194:  float valid_peak;      /**< accel envelope peak — reported as peak_mps2 */
+        -:  195:  float valid_gyro_peak; /**< gyro envelope peak — confirm strong-path only */
+        -:  196:
+        -:  197:  /* refractory */
+        -:  198:  uint32_t refractory_counter; /**< samples left in the cooldown */
+        -:  199:
+        -:  200:  uint32_t tick_count;
+        -:  201:
+        -:  202:  /* runtime-tunable parameters; defaults applied in shot_detect_init */
+        -:  203:  shot_detect_config_t cfg;
+        -:  204:  uint32_t min_hold_samples; /**< cached: cfg.min_hold_ms * SD_FS_HZ / 1000 */
+        -:  205:} sd;
+        -:  206:
+        -:  207:/* ---- Forward declarations ----------------------------------------- */
+        -:  208:
+        -:  209:static const char *sd_state_name(sd_state_t s);
+        -:  210:static uint32_t sd_onset_to_ms(uint64_t onset_us);
+        -:  211:static void sd_apply_defaults(shot_detect_config_t *cfg);
+        -:  212:static uint32_t sd_min_hold_samples(uint32_t min_hold_ms);
+        -:  213:
+function sd_state_name called 90 returned 100% blocks executed 86%
+       90:  214:static const char *sd_state_name(sd_state_t s) {
+       90:  215:  switch (s) {
+branch  0 taken 7
+branch  1 taken 63
+branch  2 taken 2
+branch  3 taken 18
+branch  4 taken 0
+        7:  216:  case SD_IDLE:
+        7:  217:    return "IDLE";
+       63:  218:  case SD_HOLD:
+       63:  219:    return "HOLD";
+        2:  220:  case SD_VALIDATING:
+        2:  221:    return "VALIDATING";
+       18:  222:  case SD_REFRACTORY:
+       18:  223:    return "REFRACTORY";
+    #####:  224:  default:
+    #####:  225:    return "?";
+        -:  226:  }
+        -:  227:}
+        -:  228:
+        -:  229:/**
+        -:  230: * @brief Onset microseconds to reported milliseconds, group-delay
+        -:  231: *        compensated so the timestamp tracks the physical release.
+        -:  232: */
+function sd_onset_to_ms called 38 returned 100% blocks executed 100%
+       38:  233:static uint32_t sd_onset_to_ms(uint64_t onset_us) {
+       38:  234:  uint64_t t =
+       38:  235:      (onset_us > SD_ENVELOPE_DELAY_US) ? onset_us - SD_ENVELOPE_DELAY_US : 0;
+       38:  236:  return (uint32_t)(t / 1000ULL);
+        -:  237:}
+        -:  238:
+function sd_apply_defaults called 27 returned 100% blocks executed 100%
+       27:  239:static void sd_apply_defaults(shot_detect_config_t *cfg) {
+       27:  240:  cfg->hold_gyro_threshold_rad_sq = SD_HOLD_GYRO_THRESH_SQ_DEFAULT;
+       27:  241:  cfg->accel_trigger_ratio = SD_TRIG_K_DEFAULT;
+       27:  242:  cfg->accel_trigger_floor_ms2 = SD_TRIG_FLOOR_DEFAULT;
+       27:  243:  cfg->gyro_trigger_ratio = SD_GYRO_TRIG_K_DEFAULT;
+       27:  244:  cfg->gyro_trigger_floor_rad_s = SD_GYRO_TRIG_FLOOR_DEFAULT;
+       27:  245:  cfg->min_hold_ms = SD_MIN_HOLD_MS_DEFAULT;
+       27:  246:}
+        -:  247:
+        -:  248:/**
+        -:  249: * @brief Convert a hold time in ms to the equivalent sample count at
+        -:  250: *        the detector's fixed 200 Hz tick rate, clamped to a safe range.
+        -:  251: */
+function sd_min_hold_samples called 34 returned 100% blocks executed 100%
+       34:  252:static uint32_t sd_min_hold_samples(uint32_t min_hold_ms) {
+       34:  253:  if (min_hold_ms < SD_MIN_HOLD_MS_MIN) {
+branch  0 taken 1 (fallthrough)
+branch  1 taken 33
+        1:  254:    min_hold_ms = SD_MIN_HOLD_MS_MIN;
+       33:  255:  } else if (min_hold_ms > SD_MIN_HOLD_MS_MAX) {
+branch  0 taken 1 (fallthrough)
+branch  1 taken 32
+        1:  256:    min_hold_ms = SD_MIN_HOLD_MS_MAX;
+        -:  257:  }
+       34:  258:  return min_hold_ms * SD_FS_HZ / 1000u;
+        -:  259:}
+        -:  260:
+function shot_detect_init called 27 returned 100% blocks executed 100%
+       27:  261:void shot_detect_init(void) {
+       27:  262:  memset(&sd, 0, sizeof(sd));
+       27:  263:  sd.state = SD_IDLE;
+       27:  264:  sd_apply_defaults(&sd.cfg);
+call    0 returned 27
+       27:  265:  sd.min_hold_samples = sd_min_hold_samples(sd.cfg.min_hold_ms);
+call    0 returned 27
+       27:  266:  ESP_LOGI(TAG, "ready — V4 dual-channel (accel + gyro) detector @ %d Hz",
+call    0 returned 27
+        -:  267:           SD_FS_HZ);
+       27:  268:}
+        -:  269:
+function shot_detect_get_config called 10 returned 100% blocks executed 100%
+       10:  270:void shot_detect_get_config(shot_detect_config_t *cfg) {
+       10:  271:  if (cfg != NULL) {
+branch  0 taken 9 (fallthrough)
+branch  1 taken 1
+        9:  272:    *cfg = sd.cfg;
+        -:  273:  }
+       10:  274:}
+        -:  275:
+function shot_detect_set_config called 8 returned 100% blocks executed 100%
+        8:  276:void shot_detect_set_config(const shot_detect_config_t *cfg) {
+        8:  277:  if (cfg == NULL) {
+branch  0 taken 1 (fallthrough)
+branch  1 taken 7
+        1:  278:    return;
+        -:  279:  }
+        -:  280:  /* Clamp the gates to a safe-bounded range — a 0 threshold would
+        -:  281:   * disarm the hold gate (steady never returns true), a negative ratio
+        -:  282:   * would invert the trigger logic. Mirrors the JSON-validated bands
+        -:  283:   * the mobile UI uses, but cannot trust them. */
+        7:  284:  shot_detect_config_t next = *cfg;
+        7:  285:  if (!isfinite(next.hold_gyro_threshold_rad_sq) ||
+call    0 returned 7
+branch  1 taken 6 (fallthrough)
+branch  2 taken 1
+        6:  286:      next.hold_gyro_threshold_rad_sq <= 0.0f) {
+branch  0 taken 1 (fallthrough)
+branch  1 taken 5
+        2:  287:    next.hold_gyro_threshold_rad_sq = SD_HOLD_GYRO_THRESH_SQ_DEFAULT;
+        -:  288:  }
+        7:  289:  if (!isfinite(next.accel_trigger_ratio) || next.accel_trigger_ratio < 1.0f) {
+call    0 returned 7
+branch  1 taken 6 (fallthrough)
+branch  2 taken 1
+branch  3 taken 1 (fallthrough)
+branch  4 taken 5
+        2:  290:    next.accel_trigger_ratio = SD_TRIG_K_DEFAULT;
+        -:  291:  }
+        7:  292:  if (!isfinite(next.accel_trigger_floor_ms2) ||
+call    0 returned 7
+branch  1 taken 6 (fallthrough)
+branch  2 taken 1
+        6:  293:      next.accel_trigger_floor_ms2 < 0.0f) {
+branch  0 taken 1 (fallthrough)
+branch  1 taken 5
+        2:  294:    next.accel_trigger_floor_ms2 = SD_TRIG_FLOOR_DEFAULT;
+        -:  295:  }
+        7:  296:  if (!isfinite(next.gyro_trigger_ratio) || next.gyro_trigger_ratio < 1.0f) {
+call    0 returned 7
+branch  1 taken 6 (fallthrough)
+branch  2 taken 1
+branch  3 taken 1 (fallthrough)
+branch  4 taken 5
+        2:  297:    next.gyro_trigger_ratio = SD_GYRO_TRIG_K_DEFAULT;
+        -:  298:  }
+        7:  299:  if (!isfinite(next.gyro_trigger_floor_rad_s) ||
+call    0 returned 7
+branch  1 taken 6 (fallthrough)
+branch  2 taken 1
+        6:  300:      next.gyro_trigger_floor_rad_s < 0.0f) {
+branch  0 taken 1 (fallthrough)
+branch  1 taken 5
+        2:  301:    next.gyro_trigger_floor_rad_s = SD_GYRO_TRIG_FLOOR_DEFAULT;
+        -:  302:  }
+        7:  303:  sd.cfg = next;
+        7:  304:  sd.min_hold_samples = sd_min_hold_samples(next.min_hold_ms);
+call    0 returned 7
+        7:  305:  ESP_LOGI(TAG,
+call    0 returned 7
+        -:  306:           "config: hold=%.4f rad^2/s^2 accelK=%.2f accelFloor=%.2f m/s^2 "
+        -:  307:           "gyroK=%.2f gyroFloor=%.2f rad/s minHold=%lu ms",
+        -:  308:           (double)sd.cfg.hold_gyro_threshold_rad_sq,
+        -:  309:           (double)sd.cfg.accel_trigger_ratio,
+        -:  310:           (double)sd.cfg.accel_trigger_floor_ms2,
+        -:  311:           (double)sd.cfg.gyro_trigger_ratio,
+        -:  312:           (double)sd.cfg.gyro_trigger_floor_rad_s,
+        -:  313:           (unsigned long)sd.cfg.min_hold_ms);
+        -:  314:}
+        -:  315:
+function shot_detect_tick called 19375 returned 100% blocks executed 96%
+    19375:  316:bool shot_detect_tick(uint64_t t_us, const float gyro_rad[3],
+        -:  317:                      const float lin_accel[3], shot_event_t *out_event) {
+    19375:  318:  sd.tick_count++;
+        -:  319:
+        -:  320:  /* accel envelope: |a| -> HP(10Hz) -> square -> mean(25ms) -> sqrt */
+    19375:  321:  float mag = sqrtf(lin_accel[0] * lin_accel[0] + lin_accel[1] * lin_accel[1] +
+    19375:  322:                    lin_accel[2] * lin_accel[2]);
+        -:  323:
+    19375:  324:  float d0 = mag - SD_HP_A1 * sd.hp_w0 - SD_HP_A2 * sd.hp_w1;
+    19375:  325:  float hp = SD_HP_B0 * d0 + SD_HP_B1 * sd.hp_w0 + SD_HP_B2 * sd.hp_w1;
+    19375:  326:  sd.hp_w1 = sd.hp_w0;
+    19375:  327:  sd.hp_w0 = d0;
+        -:  328:
+        -:  329:  /* Running-mean of the highpass energy — the running sum keeps it
+        -:  330:   * O(1); rms_buf[idx] is the sample being evicted (0 until filled). */
+    19375:  331:  float sq = hp * hp;
+    19375:  332:  sd.rms_sum += sq - sd.rms_buf[sd.rms_idx];
+    19375:  333:  sd.rms_buf[sd.rms_idx] = sq;
+    19375:  334:  sd.rms_idx = (sd.rms_idx + 1) % SD_RMS_WIN;
+    19375:  335:  if (sd.rms_count < SD_RMS_WIN) {
+branch  0 taken 120 (fallthrough)
+branch  1 taken 19255
+      120:  336:    sd.rms_count++;
+        -:  337:  }
+        -:  338:  /* fmaxf: the running sum carries float drift — a window of near-zero
+        -:  339:   * samples can leave the mean a hair below zero; clamp before sqrt. */
+    19375:  340:  float e = sqrtf(fmaxf(sd.rms_sum / (float)sd.rms_count, 0.0f));
+        -:  341:
+        -:  342:  /* --- gyro: squared magnitude drives both the hold gate (a slow EMA)
+        -:  343:   *     and a short-window-RMS release channel (the bow-rotation
+        -:  344:   *     transient at release) --- */
+    19375:  345:  float g2 = gyro_rad[0] * gyro_rad[0] + gyro_rad[1] * gyro_rad[1] +
+    19375:  346:             gyro_rad[2] * gyro_rad[2];
+        -:  347:
+    19375:  348:  sd.g_sum += g2 - sd.g_buf[sd.g_idx];
+    19375:  349:  sd.g_buf[sd.g_idx] = g2;
+    19375:  350:  sd.g_idx = (sd.g_idx + 1) % SD_RMS_WIN;
+    19375:  351:  if (sd.g_count < SD_RMS_WIN) {
+branch  0 taken 120 (fallthrough)
+branch  1 taken 19255
+      120:  352:    sd.g_count++;
+        -:  353:  }
+    19375:  354:  float g_env = sqrtf(fmaxf(sd.g_sum / (float)sd.g_count, 0.0f));
+        -:  355:
+        -:  356:  /* hold gate: low-passed gyro squared-magnitude */
+    19375:  357:  sd.gyro_g2_ema += SD_HOLD_GYRO_BETA * (g2 - sd.gyro_g2_ema);
+    19375:  358:  bool steady = sd.gyro_g2_ema < sd.cfg.hold_gyro_threshold_rad_sq;
+        -:  359:
+    19375:  360:  bool produced = false;
+        -:  361:
+    19375:  362:  switch (sd.state) {
+branch  0 taken 1792
+branch  1 taken 13300
+branch  2 taken 741
+branch  3 taken 3542
+branch  4 taken 0
+     1792:  363:  case SD_IDLE:
+     1792:  364:    if (steady) {
+branch  0 taken 32 (fallthrough)
+branch  1 taken 1760
+       32:  365:      sd.state = SD_HOLD;
+       32:  366:      sd.hold_start_tick = sd.tick_count;
+       32:  367:      sd.trig_count = 0;
+       32:  368:      sd.unsteady_count = 0;
+        -:  369:    }
+     1792:  370:    break;
+        -:  371:
+    13300:  372:  case SD_HOLD: {
+        -:  373:    /* Hold-gate hysteresis: a brief unsteady burst (aim wobble, a sight
+        -:  374:     * micro-correction) is tolerated; only a sustained one — a draw —
+        -:  375:     * disarms the detector and discards the hold's arm progress. */
+    13300:  376:    if (steady) {
+branch  0 taken 12820 (fallthrough)
+branch  1 taken 480
+    12820:  377:      sd.unsteady_count = 0;
+      480:  378:    } else if (++sd.unsteady_count > SD_HOLD_GRACE_SAMPLES) {
+branch  0 taken 6 (fallthrough)
+branch  1 taken 474
+        6:  379:      sd.state = SD_IDLE;
+        6:  380:      sd.trig_count = 0;
+        6:  381:      break;
+        -:  382:    }
+        -:  383:
+    13294:  384:    bool pending = sd.trig_count > 0;
+    13294:  385:    uint32_t held = sd.tick_count - sd.hold_start_tick;
+        -:  386:
+        -:  387:    /* Track both baselines only while genuinely holding — settled, with
+        -:  388:     * no trigger candidate in flight — so a release transient can never
+        -:  389:     * pull a baseline (and thus a threshold) up after itself. The
+        -:  390:     * baselines persist across holds; they are never reset. */
+    13294:  391:    if (!pending && held >= SD_SETTLE_SAMPLES) {
+branch  0 taken 13255 (fallthrough)
+branch  1 taken 39
+branch  2 taken 12051 (fallthrough)
+branch  3 taken 1204
+    12051:  392:      if (!sd.baseline_seeded) {
+branch  0 taken 24 (fallthrough)
+branch  1 taken 12027
+       24:  393:        sd.baseline = e;
+       24:  394:        sd.gyro_base = g_env;
+       24:  395:        sd.baseline_seeded = true;
+        -:  396:      } else {
+    12027:  397:        sd.baseline += SD_BASELINE_ALPHA * (e - sd.baseline);
+    12027:  398:        sd.gyro_base += SD_BASELINE_ALPHA * (g_env - sd.gyro_base);
+        -:  399:      }
+        -:  400:    }
+        -:  401:
+        -:  402:    /* Two parallel trigger channels: accel hand-shock and gyro bow
+        -:  403:     * rotation. A crossing on EITHER arms / advances a release. */
+    13294:  404:    float th = sd.baseline * sd.cfg.accel_trigger_ratio;
+    13294:  405:    if (th < sd.cfg.accel_trigger_floor_ms2) {
+branch  0 taken 12395 (fallthrough)
+branch  1 taken 899
+    12395:  406:      th = sd.cfg.accel_trigger_floor_ms2;
+        -:  407:    }
+    13294:  408:    float g_th = sd.gyro_base * sd.cfg.gyro_trigger_ratio;
+    13294:  409:    if (g_th < sd.cfg.gyro_trigger_floor_rad_s) {
+branch  0 taken 10950 (fallthrough)
+branch  1 taken 2344
+    10950:  410:      g_th = sd.cfg.gyro_trigger_floor_rad_s;
+        -:  411:    }
+        -:  412:
+    13294:  413:    if (pending) {
+branch  0 taken 39 (fallthrough)
+branch  1 taken 13255
+       39:  414:      if (e > th || g_env > g_th) {
+branch  0 taken 7 (fallthrough)
+branch  1 taken 32
+branch  2 taken 6 (fallthrough)
+branch  3 taken 1
+       38:  415:        if (++sd.trig_count >= SD_TRIG_DEBOUNCE) {
+branch  0 taken 19 (fallthrough)
+branch  1 taken 19
+       19:  416:          sd.state = SD_VALIDATING;
+       19:  417:          sd.valid_total = 0;
+       19:  418:          sd.valid_active = 0;
+       19:  419:          sd.valid_peak = 0.0f;
+       19:  420:          sd.valid_gyro_peak = 0.0f;
+       19:  421:          out_event->type = SHOT_EVT_PROVISIONAL;
+       19:  422:          out_event->onset_ms = sd_onset_to_ms(sd.onset_us);
+call    0 returned 19
+       19:  423:          out_event->peak_mps2 = 0.0f;
+       19:  424:          produced = true;
+       19:  425:          ESP_LOGI(TAG, "trigger: onset=%lu ms (E=%.2f/%.2f G=%.2f/%.2f)",
+call    0 returned 19
+        -:  426:                   (unsigned long)out_event->onset_ms, e, th, g_env, g_th);
+        -:  427:        }
+        -:  428:      } else {
+        1:  429:        sd.trig_count = 0; /* sub-debounce blip — not a release */
+        -:  430:      }
+        -:  431:    } else {
+    13255:  432:      bool armed = sd.baseline_seeded && held >= sd.min_hold_samples;
+branch  0 taken 12319 (fallthrough)
+branch  1 taken 936
+branch  2 taken 9555 (fallthrough)
+branch  3 taken 2764
+    13255:  433:      bool accel_cross = sd.e_prev <= th && e > th;
+branch  0 taken 13236 (fallthrough)
+branch  1 taken 19
+branch  2 taken 18 (fallthrough)
+branch  3 taken 13218
+    13255:  434:      bool gyro_cross = sd.g_env_prev <= g_th && g_env > g_th;
+branch  0 taken 13124 (fallthrough)
+branch  1 taken 131
+branch  2 taken 17 (fallthrough)
+branch  3 taken 13107
+    13255:  435:      if (armed && (accel_cross || gyro_cross)) {
+branch  0 taken 9555 (fallthrough)
+branch  1 taken 3700
+branch  2 taken 9539 (fallthrough)
+branch  3 taken 16
+branch  4 taken 4 (fallthrough)
+branch  5 taken 9535
+        -:  436:        /* Rising-edge crossing — record the tick for window timing and
+        -:  437:         * interpolate the wall-clock onset on whichever channel crossed
+        -:  438:         * (accel takes precedence when both crossed the same tick). */
+       20:  439:        float prev = accel_cross ? sd.e_prev : sd.g_env_prev;
+branch  0 taken 16 (fallthrough)
+branch  1 taken 4
+       20:  440:        float cur = accel_cross ? e : g_env;
+branch  0 taken 16 (fallthrough)
+branch  1 taken 4
+       20:  441:        float lvl = accel_cross ? th : g_th;
+branch  0 taken 16 (fallthrough)
+branch  1 taken 4
+       20:  442:        float span = cur - prev;
+      20*:  443:        float frac = span > 0.0f ? (lvl - prev) / span : 0.0f;
+branch  0 taken 20 (fallthrough)
+branch  1 taken 0
+       20:  444:        if (frac < 0.0f) {
+branch  0 taken 0 (fallthrough)
+branch  1 taken 20
+    #####:  445:          frac = 0.0f;
+       20:  446:        } else if (frac > 1.0f) {
+branch  0 taken 0 (fallthrough)
+branch  1 taken 20
+    #####:  447:          frac = 1.0f;
+        -:  448:        }
+       20:  449:        sd.onset_us =
+       20:  450:            sd.t_prev_us + (uint64_t)(frac * (float)(t_us - sd.t_prev_us));
+       20:  451:        sd.onset_tick = sd.tick_count;
+       20:  452:        sd.trig_count = 1;
+        -:  453:      }
+        -:  454:    }
+    13294:  455:    break;
+        -:  456:  }
+        -:  457:
+      741:  458:  case SD_VALIDATING: {
+        -:  459:    /* since = samples elapsed from the onset crossing — the debounce
+        -:  460:     * offset is absorbed because it counts from onset_tick, not the
+        -:  461:     * trigger-confirm tick. */
+      741:  462:    uint32_t since = sd.tick_count - sd.onset_tick;
+      741:  463:    if (since >= SD_VALID_DELAY_SAMPLES && since <= SD_VALID_END_SAMPLES) {
+branch  0 taken 684 (fallthrough)
+branch  1 taken 57
+branch  2 taken 665 (fallthrough)
+branch  3 taken 19
+      665:  464:      sd.valid_total++;
+        -:  465:      /* a sample is ring-down activity if EITHER channel is elevated —
+        -:  466:       * a gyro-triggered release with a weak hand-shock still confirms. */
+      665:  467:      if (e > sd.baseline * SD_CONF_K || g_env > sd.gyro_base * SD_CONF_K) {
+branch  0 taken 248 (fallthrough)
+branch  1 taken 417
+branch  2 taken 75 (fallthrough)
+branch  3 taken 173
+      492:  468:        sd.valid_active++;
+        -:  469:      }
+      665:  470:      if (e > sd.valid_peak) {
+branch  0 taken 55 (fallthrough)
+branch  1 taken 610
+       55:  471:        sd.valid_peak = e;
+        -:  472:      }
+      665:  473:      if (g_env > sd.valid_gyro_peak) {
+branch  0 taken 72 (fallthrough)
+branch  1 taken 593
+       72:  474:        sd.valid_gyro_peak = g_env;
+        -:  475:      }
+        -:  476:    }
+      741:  477:    if (since > SD_VALID_END_SAMPLES) {
+branch  0 taken 19 (fallthrough)
+branch  1 taken 722
+    #####:  478:      float frac = sd.valid_total > 0
+       19:  479:                       ? (float)sd.valid_active / (float)sd.valid_total
+       19:  480:                       : 0.0f;
+branch  0 taken 19 (fallthrough)
+branch  1 taken 0
+       19:  481:      bool ring_down = frac > SD_SUSTAIN_FRAC;
+       26:  482:      bool strong = sd.valid_peak > sd.baseline * SD_STRONG_K ||
+branch  0 taken 7 (fallthrough)
+branch  1 taken 12
+        7:  483:                    sd.valid_gyro_peak > sd.gyro_base * SD_STRONG_K;
+branch  0 taken 1 (fallthrough)
+branch  1 taken 6
+       19:  484:      bool confirmed = ring_down || strong;
+branch  0 taken 6 (fallthrough)
+branch  1 taken 13
+branch  2 taken 1 (fallthrough)
+branch  3 taken 5
+        -:  485:
+       19:  486:      out_event->type = confirmed ? SHOT_EVT_CONFIRMED : SHOT_EVT_REJECTED;
+branch  0 taken 14 (fallthrough)
+branch  1 taken 5
+       19:  487:      out_event->onset_ms = sd_onset_to_ms(sd.onset_us);
+call    0 returned 19
+       19:  488:      out_event->peak_mps2 = sd.valid_peak;
+       19:  489:      produced = true;
+        -:  490:
+       19:  491:      sd.refractory_counter =
+       19:  492:          confirmed ? SD_REFRACTORY_OK_SAMPLES : SD_REFRACTORY_REJ_SAMPLES;
+branch  0 taken 14 (fallthrough)
+branch  1 taken 5
+       19:  493:      sd.state = SD_REFRACTORY;
+       19:  494:      ESP_LOGI(TAG, "%s: onset=%lu ms peak=%.2f gpeak=%.2f sustain=%d/%d",
+branch  0 taken 14 (fallthrough)
+branch  1 taken 5
+call    2 returned 19
+        -:  495:               confirmed ? "CONFIRMED" : "rejected",
+        -:  496:               (unsigned long)out_event->onset_ms, sd.valid_peak,
+        -:  497:               sd.valid_gyro_peak, sd.valid_active, sd.valid_total);
+        -:  498:    }
+      741:  499:    break;
+        -:  500:  }
+        -:  501:
+     3542:  502:  case SD_REFRACTORY:
+     3542:  503:    if (sd.refractory_counter > 0) {
+branch  0 taken 3542 (fallthrough)
+branch  1 taken 0
+     3542:  504:      sd.refractory_counter--;
+        -:  505:    }
+     3542:  506:    if (sd.refractory_counter == 0) {
+branch  0 taken 4 (fallthrough)
+branch  1 taken 3538
+        4:  507:      sd.state = SD_IDLE;
+        4:  508:      sd.trig_count = 0;
+        -:  509:    }
+     3542:  510:    break;
+        -:  511:  }
+        -:  512:
+    19375:  513:  sd.e_prev = e;
+    19375:  514:  sd.g_env_prev = g_env;
+    19375:  515:  sd.t_prev_us = t_us;
+        -:  516:
+        -:  517:  /* 1 Hz diagnostic — the data you tune the floors / the K's against. */
+    19375:  518:  if (sd.tick_count % SD_FS_HZ == 0) {
+branch  0 taken 90 (fallthrough)
+branch  1 taken 19285
+       90:  519:    ESP_LOGI(TAG, "[%s] E=%.3f base=%.3f | G=%.3f gbase=%.3f",
+call    0 returned 90
+call    1 returned 90
+        -:  520:             sd_state_name(sd.state), e, sd.baseline, g_env, sd.gyro_base);
+        -:  521:  }
+        -:  522:
+    19375:  523:  return produced;
+        -:  524:}

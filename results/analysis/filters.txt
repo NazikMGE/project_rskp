@@ -1,0 +1,39 @@
+Highpass 10 Hz, order 2, fs = 200 Hz (shot_detect.c)
+  max |firmware - scipy| coefficient difference: 6.93e-09
+  |H( 1 Hz)| = 0.0098  ( -40.1 dB)
+  |H( 2 Hz)| = 0.0393  ( -28.1 dB)
+  |H( 5 Hz)| = 0.2397  ( -12.4 dB)
+  |H(10 Hz)| = 0.7071  (  -3.0 dB)
+  |H(20 Hz)| = 0.9729  (  -0.2 dB)
+  |H(38 Hz)| = 0.9985  (  -0.0 dB)
+  |H(55 Hz)| = 0.9998  (  -0.0 dB)
+  pole radius: 0.8008
+
+Bandpass 0.5-3 Hz, order 2 (two biquads), fs = 50 Hz (stability.c)
+  max |firmware - scipy| coefficient difference: 4.19e-11
+  |H(  0.1 Hz)| = 0.0282  ( -31.0 dB)
+  |H( 0.25 Hz)| = 0.1863  ( -14.6 dB)
+  |H(  0.5 Hz)| = 0.7071  (  -3.0 dB)
+  |H(  1.0 Hz)| = 0.9991  (  -0.0 dB)
+  |H(  1.5 Hz)| = 0.9993  (  -0.0 dB)
+  |H(  3.0 Hz)| = 0.7071  (  -3.0 dB)
+  |H(  6.0 Hz)| = 0.1725  ( -15.3 dB)
+  |H( 10.0 Hz)| = 0.0491  ( -26.2 dB)
+  |H( 15.0 Hz)| = 0.0135  ( -37.4 dB)
+  pole radii: 0.8324, 0.9621
+  the same filter designed for 200 Hz, pole radii: 0.9551, 0.9904
+
+Moving average, 4 samples, fs = 200 Hz (main.cpp)
+  -3 dB frequency: 22.8 Hz
+  |H(12 Hz)| = 0.9133 (top of the tremor band)
+  group delay: 7.5 ms
+  white-noise reduction: 6.02 dB
+  zeros at: 50 Hz, 100 Hz
+
+Time constants of the exponential averages, tau = -1 / (fs * ln(1 - alpha))
+  hold gate (gyro mean square)       alpha = 0.0166  tau =    299 ms
+  envelope baselines                 alpha = 0.005   tau =    997 ms
+  stability: rate term               alpha = 0.2     tau =     90 ms
+  stability: sway and drift terms    alpha = 0.1     tau =    190 ms
+  stability: reference orientation   alpha = 0.04    tau =    490 ms
+  stability: display smoothing       alpha = 0.25    tau =     70 ms

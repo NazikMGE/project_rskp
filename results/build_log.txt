@@ -1,0 +1,14 @@
+[1/14] Building C object CMakeFiles/imu_profile_test.dir/imu_profile_test.c.obj
+[2/14] Building C object CMakeFiles/host_support.dir/host_log.c.obj
+[3/14] Building C object CMakeFiles/control_example.dir/control_example.c.obj
+[4/14] Building C object CMakeFiles/stability.dir/b802ffb46a64bbc149eeaa58e47cbd87/project/firmware/services/stability/src/stability.c.obj
+[5/14] Building C object CMakeFiles/shot_detect.dir/b802ffb46a64bbc149eeaa58e47cbd87/project/firmware/services/shot_detect/src/shot_detect.c.obj
+[6/14] Building C object CMakeFiles/stability_test.dir/stability_test.c.obj
+[7/14] Building C object CMakeFiles/shot_detect_test.dir/shot_detect_test.c.obj
+[8/14] Linking C static library libhost_support.a
+[9/14] Linking C executable imu_profile_test.exe
+[10/14] Linking C static library libstability.a
+[11/14] Linking C static library libshot_detect.a
+[12/14] Linking C executable control_example.exe
+[13/14] Linking C executable stability_test.exe
+[14/14] Linking C executable shot_detect_test.exe

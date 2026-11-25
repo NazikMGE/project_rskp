@@ -1,0 +1,32 @@
+control example: 4800 samples at 200 Hz, 1200 frames at 50 Hz
+detector events:
+  1  t=  5.010 s  PROVISIONAL  onset=64983 ms (4.983 s)  peak=0.00 m/s^2
+  2  t=  5.205 s  CONFIRMED    onset=64983 ms (4.983 s)  peak=17.75 m/s^2
+  3  t= 12.010 s  PROVISIONAL  onset=71987 ms (11.987 s)  peak=0.00 m/s^2
+  4  t= 12.205 s  REJECTED     onset=71987 ms (11.987 s)  peak=0.67 m/s^2
+  5  t= 14.010 s  PROVISIONAL  onset=73983 ms (13.983 s)  peak=0.00 m/s^2
+  6  t= 14.205 s  CONFIRMED    onset=73983 ms (13.983 s)  peak=16.61 m/s^2
+  7  t= 21.065 s  PROVISIONAL  onset=81039 ms (21.039 s)  peak=0.00 m/s^2
+  8  t= 21.260 s  CONFIRMED    onset=81039 ms (21.039 s)  peak=0.11 m/s^2
+checks:
+  [ OK ] exactly 8 events: four stimuli, two events each
+  [ OK ] release 1: PROVISIONAL + CONFIRMED with a common onset
+  [ OK ] release 1: onset error -17 ms within +/-25 ms
+  [ OK ] release 1: provisional event after 10 ms (<= 20 ms)
+  [ OK ] release 1: peak 17.75 m/s^2 is above 5 m/s^2
+  [ OK ] knock: PROVISIONAL + REJECTED with a common onset
+  [ OK ] knock: onset error -13 ms within +/-25 ms
+  [ OK ] knock: provisional event after 10 ms (<= 20 ms)
+  [ OK ] knock: peak 0.67 m/s^2 is below 5 m/s^2
+  [ OK ] release 2: PROVISIONAL + CONFIRMED with a common onset
+  [ OK ] release 2: onset error -17 ms within +/-25 ms
+  [ OK ] release 2: provisional event after 10 ms (<= 20 ms)
+  [ OK ] release 2: peak 16.61 m/s^2 is above 5 m/s^2
+  [ OK ] let-down: PROVISIONAL + CONFIRMED with a common onset
+  [ OK ] let-down: provisional event after 65 ms (<= 100 ms)
+  [ OK ] let-down: peak 0.11 m/s^2 is below 5 m/s^2
+stability score: steady hold 88.5, unsteady hold 70.1, draw 0.5
+  [ OK ] score of the steady hold exceeds the unsteady one by over 10
+  [ OK ] score during the draw is below 20
+control example: PASSED
+exit code: 0

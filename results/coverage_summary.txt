@@ -1,0 +1,12 @@
+File 'services/shot_detect/src/shot_detect.c'
+Lines executed:97.35% of 189
+Branches executed:100.00% of 132
+Taken at least once:94.70% of 132
+Calls executed:100.00% of 16
+
+File 'services/stability/src/stability.c'
+Lines executed:100.00% of 103
+Branches executed:100.00% of 24
+Taken at least once:100.00% of 24
+Calls executed:100.00% of 11
+

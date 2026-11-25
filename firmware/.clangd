@@ -1,0 +1,24 @@
+CompileFlags:
+  CompilationDatabase: build
+  Remove:
+    # GCC-specific flags that clangd doesn't understand and warns about.
+    - -fno-tree-switch-conversion
+    - -fstrict-volatile-bitfields
+    - -fno-shrink-wrap
+    - -fno-jump-tables
+    - -mlongcalls
+    - -mtext-section-literals
+    - -mfix-esp32-psram-cache-issue
+    - -mfix-esp32-psram-cache-strategy=memw
+
+Diagnostics:
+  Suppress:
+    # Xtensa/RISC-V GCC builtins that clangd's libc++ doesn't model.
+    - unknown-typename
+    - unknown-attributes
+    # ESP-IDF macros lean on GCC extensions clangd flags as warnings
+    # but the build is fine — silence them locally.
+    - -Wmissing-prototypes
+
+Index:
+  Background: Build

@@ -1,0 +1,6 @@
+date: 2026-11-16
+os: Microsoft Windows NT 10.0.26300.0
+gcc: gcc.exe (Rev13, Built by MSYS2 project) 15.2.0
+gcov: gcov (Rev13, Built by MSYS2 project) 15.2.0
+cmake: cmake version 4.3.0-rc1
+ninja: 1.13.0.git.kitware.jobserver-pipe-1
